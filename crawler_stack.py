@@ -6,13 +6,14 @@
 Modes
   fast     aiohttp + asyncio.Semaphore          (highest throughput, static HTML)
   stealth  curl_cffi Chrome TLS/UA impersonate  (fingerprint-gated sites)
-  render   headless Chromium via Playwright     (Javascript-rendered pages)
+  render   headless Chromium via Playwright     (JS pages; one reused page,
+           serial goto, sync API in a fresh subprocess per batch)
 
 Every third-party dependency is optional: missing ones fall back to urllib.
 The module is safe to import on a machine with none of them installed.
 
 Measured on Windows 11 / Python 3.13, localhost HTTP echo, N=100:
-  fast 2971 req/s | stealth 1107 req/s | render 13.75 pages/s
+  fast 2971 req/s | stealth 1107 req/s | render ~5.7 pages/s serial-safe
 Parsing pages/s: selectolax 27684 > lxml 22292 > parsel 11596 > bs4 1844 > trafilatura 139
 """
 
@@ -172,41 +173,80 @@ def _stealth(urls, concurrency, timeout, with_text):
         return list(ex.map(one, urls))
 
 
+# Playwright's asyncio loop cannot be started with asyncio.run() repeatedly in
+# one process on Windows: the 3rd launch at concurrency>=4 can deadlock inside
+# browser.new_page()/close() and ignore the per-URL timeout entirely (measured
+# 2026-11-09). Running the whole render batch in a fresh subprocess is the only
+# reliable isolation; each call gets a clean event loop and a clean browser.
+_RENDER_WORKER = r"""
+import sys, json, time
+from playwright.sync_api import sync_playwright
+
+def main():
+    cfg = json.loads(sys.stdin.read())
+    urls, timeout = cfg["urls"], cfg["timeout"]
+    print("__RENDER_START__", flush=True)
+    results = []
+    # sync_playwright in a fresh subprocess is the only reliable shape here.
+    # async_playwright + asyncio.run() spawned with `python -c CODE` hangs
+    # before producing any output on this host (Windows 11 / Python 3.13),
+    # reproducibly from inside pytest and from nested subprocesses.
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, timeout=15000)
+        print("__RENDER_LAUNCHED__", flush=True)
+        # ONE page reused serially. Concurrently opening pages from a single
+        # Chromium also deadlocks intermittently here; serial goto is stable.
+        page = browser.new_page()
+        for u in urls:
+            t = time.perf_counter()
+            try:
+                page.goto(u, wait_until="domcontentloaded", timeout=timeout * 1000)
+                results.append({
+                    "url": u, "status": 200, "title": page.title(),
+                    "text": page.inner_text("body")[:5000],
+                    "links": page.eval_on_selector_all(
+                        "a[href]", "els => els.map(e => e.getAttribute('href')).slice(0,50)"),
+                    "elapsed": round(time.perf_counter() - t, 3)})
+            except Exception as e:
+                results.append({"url": u, "error": str(e)[:120],
+                                "elapsed": round(time.perf_counter() - t, 3)})
+        page.close()
+        browser.close()
+    print("__RENDER_JSON__" + json.dumps(results, ensure_ascii=False))
+
+main()
+"""
+
+
 def _render(urls, concurrency, timeout, with_text):
+    import json as _json
+    import os as _os
+    import subprocess
+    import sys as _sys
     pw = _import("playwright.async_api")
     if pw is None:
         return [{"url": u, "error": "playwright unavailable; cannot render"} for u in urls]
-
-    async def run():
-        import asyncio
-        results = []
-        async with pw.async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            sem = asyncio.Semaphore(max(1, min(concurrency, 4)))
-            async def one(u):
-                async with sem:
-                    t = time.perf_counter()
-                    try:
-                        page = await browser.new_page()
-                        await page.goto(u, wait_until="domcontentloaded", timeout=timeout * 1000)
-                        d = {"url": u, "status": 200, "title": await page.title(),
-                             "text": (await page.inner_text("body"))[:5000],
-                             "links": await page.eval_on_selector_all("a[href]", "els => els.map(e => e.getAttribute('href')).slice(0,50)"),
-                             "elapsed": round(time.perf_counter() - t, 3)}
-                        await page.close()
-                        return d
-                    except Exception as e:
-                        return {"url": u, "error": str(e)[:120],
-                                "elapsed": round(time.perf_counter() - t, 3)}
-            results = await asyncio.gather(*[one(u) for u in urls])
-            await browser.close()
-        return results
-    import asyncio
+    cfg = {"urls": list(urls), "concurrency": max(1, int(concurrency)),
+           "timeout": float(timeout), "with_text": bool(with_text)}
+    # Hard wall-clock guard: the whole serial batch is one subprocess. Cover
+    # every URL plus browser startup/shutdown, so a hung browser cannot block.
+    wall = max(30.0, float(timeout) * (len(urls) + 2) + 20.0)
     try:
-        return list(asyncio.run(run()))
+        proc = subprocess.run(
+            [_sys.executable, "-u", "-c", _RENDER_WORKER],
+            input=_json.dumps(cfg), capture_output=True, text=True, timeout=wall,
+            encoding="utf-8", errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        marker = "__RENDER_JSON__"
+        line = next((l for l in proc.stdout.splitlines() if l.startswith(marker)), None)
+        if line:
+            return _json.loads(line[len(marker):])
+        err = (proc.stderr or proc.stdout).strip()[-160:] or "no output"
+        return [{"url": u, "error": "render worker: " + err} for u in urls]
+    except subprocess.TimeoutExpired:
+        return [{"url": u, "error": "render worker exceeded wall clock %.0fs" % wall} for u in urls]
     except Exception as e:
-        return [{"url": u, "error": "render engine: " + str(e)[:100]} for u in urls]
-
+        return [{"url": u, "error": "render engine: " + str(e)[:120]} for u in urls]
 
 def crawl(urls, mode="fast", concurrency=20, timeout=8, with_text=False):
     """Fetch URLs concurrently. Returns a dict; per-URL errors never abort the batch.

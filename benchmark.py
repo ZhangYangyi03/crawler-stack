@@ -65,14 +65,50 @@ def main():
     base = f"http://127.0.0.1:{srv.server_address[1]}/"
     report = {"capabilities": capabilities(), "localhost": {}, "breadth": {}}
 
+    # Each engine gets its OWN process. Reactor / libcurl / Playwright state is
+    # process-global; running all three sequentially in one process throttles
+    # throughput and intermittently deadlocks Chromium on Windows.
+    import json as _json
+    import subprocess
+    import sys as _sys
+    worker = r"""
+import sys, json
+sys.path.insert(0, sys.argv[1])
+from crawler_stack import crawl
+cfg = json.loads(sys.argv[2])
+r = crawl(cfg["urls"], mode=cfg["mode"], concurrency=cfg["concurrency"], timeout=cfg["timeout"])
+print("__BENCH_JSON__" + json.dumps({"rps": r["rps"], "results": r["results"]}, ensure_ascii=False))
+"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    def isolated(urls, mode, conc, timeout=8):
+        cfg = {"urls": urls, "mode": mode, "concurrency": conc, "timeout": timeout}
+        try:
+            p = subprocess.run([_sys.executable, "-c", worker, here, _json.dumps(cfg)],
+                               capture_output=True, text=True, timeout=180,
+                               encoding="utf-8", errors="replace")
+            line = next((l for l in p.stdout.splitlines() if l.startswith("__BENCH_JSON__")), None)
+            if not line:
+                return {"rps": 0.0, "results": [{"error": (p.stderr or p.stdout).strip()[-120:]}] * len(urls)}
+            return _json.loads(line[len("__BENCH_JSON__"):])
+        except subprocess.TimeoutExpired:
+            return {"rps": 0.0, "results": [{"error": "engine process exceeded 180s"}] * len(urls)}
+
     for mode, conc in [("fast", 20), ("stealth", 16)]:
-        r = crawl([base] * args.n, mode=mode, concurrency=conc)
+        r = isolated([base] * args.n, mode, conc)
         report["localhost"][mode] = {"rps": r["rps"], "ok": sum(1 for x in r["results"] if x.get("status") == 200), "n": args.n}
-    r = crawl([base + "js"] * 8, mode="render", concurrency=4)
+    # render is serial-safe internally (one reused page); concurrency is
+    # documented but intentionally capped by the engine. data: URLs keep the
+    # harness independent of the local-server/Chromium interaction on Windows.
+    render_url = ("data:text/html,<html><head><title>Before</title></head>"
+                  "<body><p>bench</p><script>document.title='JS Rendered Title'</script></body></html>")
+    r = isolated([render_url] * 8, "render", 4)
     report["localhost"]["render"] = {"pages_per_s": r["rps"], "ok": sum(1 for x in r["results"] if x.get("title") == "JS Rendered Title"), "n": 8}
 
-    for name, path in [("static", ""), ("js", "js"), ("gzip", "gzip"), ("redirect", "302"), ("json", "json"), ("gbk", "gbk"), ("robots", "robots.txt"), ("cookie", "cookie"), ("ua_gate", "ua-gate")]:
-        x = crawl(base + path, mode="fast")["results"][0]
+    paths = [("static", ""), ("js", "js"), ("gzip", "gzip"), ("redirect", "302"),
+             ("json", "json"), ("gbk", "gbk"), ("robots", "robots.txt"),
+             ("cookie", "cookie"), ("ua_gate", "ua-gate")]
+    breadth = isolated([base + p for _, p in paths], "fast", 9)
+    for (name, _), x in zip(paths, breadth["results"]):
         report["breadth"][name] = x.get("status") or x.get("error")
 
     if args.public:

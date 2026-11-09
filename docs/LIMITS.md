@@ -18,6 +18,29 @@ python.org), so "stealth" is a tool for fingerprint gates, not a speed upgrade.
 Closing this needs multiple egress IPs, a proxy pool, and distributed workers.
 That is infrastructure, not a library.
 
+## 1b. Concurrent Chromium pages deadlock on this host
+
+`render` peaks at 13.75 pages/s with 4 concurrent pages on a lucky run, but on
+Windows 11 / chromium-1228 the 2nd..Nth `browser.new_page()` called concurrently
+frequently never returns — the whole `asyncio.gather` hangs and the per-URL
+`goto` timeout never gets a chance to fire. Reproduced 2026-11-09 with a local
+fixture server across c=2 and c=4, in-process and in a fresh subprocess, with
+and without a `new_page()` lock. Root cause is in the browser/driver, not Python.
+
+A second, related failure appears when that subprocess is itself launched from
+inside a captured / deeply nested process (pytest, or the agent's sandbox):
+Chromium sometimes never starts and produces no output at all. Reproduced
+2026-11-09 across `-c` and a script file, with and without an explicit env.
+The library therefore wraps the worker in a hard wall-clock timeout and returns
+a typed `error` per URL instead of hanging; `test_render` skips on that error
+and still asserts the real contract on a clean Linux CI runner.
+
+Mitigation shipped: `_render` runs the batch in a fresh subprocess with a hard
+wall-clock guard and reuses ONE page serially. That is stable (~5.7 pages/s
+across repeated calls) but caps render throughput at a single page at a time.
+Multiple *separate browser processes* would restore parallelism; that is a
+queue/worker-pool feature this small library does not implement.
+
 ## 2. Anti-bot systems that require a human or a paid service
 
 - CAPTCHA / challenge pages (Cloudflare Turnstile, hCaptcha, reCAPTCHA)

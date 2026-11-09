@@ -15,7 +15,7 @@ print(r["rps"], r["results"][0]["title"], r["results"][0]["links"][:5])
 |---|---|---|---|
 | `fast` | aiohttp + semaphore | bulk static HTML | 2971 req/s |
 | `stealth` | curl_cffi Chrome impersonation | UA / TLS fingerprint gates | 1107 req/s |
-| `render` | headless Chromium (Playwright) | Javascript-rendered pages | 13.75 pages/s |
+| `render` | headless Chromium (Playwright) | Javascript-rendered pages | ~5.7 pages/s (serial-safe) |
 
 All dependencies are optional. Missing ones fall back to stdlib `urllib`, so the
 module always imports and never aborts a batch because one URL failed.
@@ -52,7 +52,8 @@ urllib sequential        307 req/s
 aiohttp concurrent      2971 req/s
 curl_cffi stealth       1107 req/s
 Scrapy 2.20 + parse       96 req/s
-Playwright render       13.75 pages/s
+Playwright render       13.75 pages/s peak (concurrent opening deadlocks
+                        intermittently on Windows; stable serial reuse ~5.7 pages/s)
 ```
 
 Parsing throughput (pages/s):
