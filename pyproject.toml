@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crawler-stack"
+version = "0.1.0"
+description = "One-call concurrent web fetching: aiohttp, TLS-fingerprint stealth, headless rendering, and fast HTML extraction, with measured benchmarks."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [{name = "ZhangYangyi03"}]
+keywords = ["crawler", "scraping", "aiohttp", "curl-cffi", "playwright", "selectolax"]
+dependencies = ["aiohttp>=3.9", "curl_cffi>=0.7", "selectolax>=0.3.25", "trafilatura>=1.12", "playwright>=1.40", "lxml>=5.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.urls]
+Homepage = "https://github.com/ZhangYangyi03/crawler-stack"
+
+[tool.setuptools]
+py-modules = ["crawler_stack"]
