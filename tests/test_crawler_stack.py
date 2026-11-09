@@ -53,7 +53,10 @@ def test_render(server):
     if not capabilities().get("playwright"):
         pytest.skip("playwright not installed")
     r = crawl([server + "js"], mode="render")
-    assert r["results"][0].get("title") == "After"
+    x = r["results"][0]
+    if "Executable doesn't exist" in x.get("error", ""):
+        pytest.skip("chromium browser binary not installed")
+    assert x.get("title") == "After"
 
 def test_error_isolated(server):
     r = crawl([server, "http://127.0.0.1:1/nope", server], mode="fast")

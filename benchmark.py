@@ -60,6 +60,7 @@ def main():
     ap.add_argument("--n", type=int, default=100)
     args = ap.parse_args()
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}/"
     report = {"capabilities": capabilities(), "localhost": {}, "breadth": {}}
@@ -85,8 +86,9 @@ def main():
                                       "ok": sum(1 for x in r["results"] if x.get("status") == 200),
                                       "errors": [x.get("error", "")[:60] for x in r["results"] if x.get("error")]}
     srv.shutdown()
+    srv.server_close()
     out = json.dumps(report, ensure_ascii=False, indent=2)
-    print(out)
+    print(out, flush=True)
     with open("benchmark_results.json", "w", encoding="utf-8") as f:
         f.write(out)
 

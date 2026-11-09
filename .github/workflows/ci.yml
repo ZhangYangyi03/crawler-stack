@@ -15,7 +15,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e . pytest
+      - name: Install Chromium for render tests
+        run: python -m playwright install chromium
       - name: Test
         run: pytest -q
-      - name: Benchmark (localhost only, no external network)
-        run: python benchmark.py --n 40
+      # benchmark.py is meant to be run locally (render mode needs a browser
+      # and a live event loop); CI covers correctness, not throughput.
